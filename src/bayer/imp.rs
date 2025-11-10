@@ -96,7 +96,7 @@ unsafe extern "C" fn get_unit_size_trampoline(
                         *size = 3 * height * width;
                         glib::ffi::GTRUE
                     }
-                    "RGBA" | "BGRA" | "RGBx" | "BGRx" => {
+                    "RGBA"  => {
                         *size = 4 * height * width;
                         glib::ffi::GTRUE
                     }
@@ -322,14 +322,12 @@ impl BaseTransformImpl for RsBayer2Rgb {
         let mut state_guard = self.state.lock().unwrap();
         let state = state_guard.as_mut().ok_or(gst::FlowError::NotNegotiated)?;
 
-        // Map input buffer (Bayer data)
         let in_map = inbuf.map_readable().map_err(|_| gst::FlowError::Error)?;
         let in_data = in_map.as_slice();
 
         let mut out_frame =
             gst_video::VideoFrameRef::from_buffer_ref_writable(outbuf, &state.out_info)
                 .map_err(|_| gst::FlowError::Error)?;
-        // Map output buffer (RGB data) - wrapping in VideoFrame for convenience
 
         gst::info!(
             CAT,
@@ -358,7 +356,7 @@ fn opencv_transform(
             state.in_info.width as i32,
             opencv::core::CV_8UC1, //bayer will always be this
             in_data.as_ptr() as *mut std::ffi::c_void,
-            state.in_info.stride, // Pass stride explicitly
+            state.in_info.stride,
         )
         .unwrap()
     };
@@ -368,8 +366,8 @@ fn opencv_transform(
         //One pass, RGGB -> BGR/RGB
         {
             let conversion = match state.out_info.format() {
-                gst_video::VideoFormat::Bgr => opencv::imgproc::COLOR_BayerRGGB2BGR_EA,
-                gst_video::VideoFormat::Rgb => opencv::imgproc::COLOR_BayerRGGB2RGB_EA,
+                gst_video::VideoFormat::Bgr => opencv::imgproc::COLOR_BayerRGGB2BGR,
+                gst_video::VideoFormat::Rgb => opencv::imgproc::COLOR_BayerRGGB2RGB,
                 _ => return Err(gst::FlowError::NotNegotiated),
             };
             let mut output_mat = unsafe {
@@ -388,6 +386,10 @@ fn opencv_transform(
                 .map_err(|_| gst::FlowError::Error)
         }
         gst_video::VideoFormat::Rgba => {
+            //Two pass RGGB -> RGB -> RGBA, slow but more compatible
+
+            //Put this first conversion on it's own bracket to limit the mutable scope of
+            //intermdiate_rgb
             {
                 let mut intermediate_rgb = match &mut state.intermediate_rgb {
                     Some(mat) => mat,
@@ -408,9 +410,9 @@ fn opencv_transform(
                 opencv::imgproc::cvt_color_def(
                     &input_mat,
                     &mut intermediate_rgb,
-                    opencv::imgproc::COLOR_BayerRGGB2RGB_EA,
+                    opencv::imgproc::COLOR_BayerRGGB2RGB,
                 )
-                .map_err(|_| gst::FlowError::Error);
+                .map_err(|_| gst::FlowError::Error)?;
             }
 
             let mut output_mat = unsafe {
