@@ -28,6 +28,7 @@ pub struct RsBayer2Rgb {
 struct State {
     in_info: InputInfo,
     out_info: gst_video::VideoInfo,
+    intermediate_rgb: Option<opencv::core::Mat>,
 }
 
 struct InputInfo {
@@ -56,7 +57,7 @@ impl ObjectSubclass for RsBayer2Rgb {
 }
 
 unsafe extern "C" fn get_unit_size_trampoline(
-    ptr: *mut ffi::GstBaseTransform,
+    _ptr: *mut ffi::GstBaseTransform,
     caps: *mut gst_sys::GstCaps,
     size: *mut usize
 ) -> i32 {
@@ -81,7 +82,16 @@ unsafe extern "C" fn get_unit_size_trampoline(
 
         match structure.name().as_str() {
             "video/x-bayer" => *size = 1 * height * width,
-            "video/raw" => *size = 3 * height * width,
+            "video/raw" => {
+                let Ok(format) = structure.get::<&str>("format") else {
+                    return 0
+                };
+                match format {
+                    "RGB" | "BGR" => *size = 3 * height * width,
+                    "RGBA" | "BGRA" | "RGBx" | "BGRx" => *size = 4 * height * width,
+                    _ => return 0,
+                }
+            }
             _ => return 0
 
         }
@@ -128,8 +138,6 @@ impl ElementImpl for RsBayer2Rgb {
                 .format_list([
                     gst_video::VideoFormat::Rgb,
                     gst_video::VideoFormat::Bgr,
-                    gst_video::VideoFormat::Rgbx,
-                    gst_video::VideoFormat::Bgrx,
                     gst_video::VideoFormat::Rgba,
                     gst_video::VideoFormat::Bgra,
                 ])
@@ -199,6 +207,9 @@ impl BaseTransformImpl for RsBayer2Rgb {
                 // Create RGB variants
                 for format in [
                     gst_video::VideoFormat::Rgb,
+                    gst_video::VideoFormat::Bgr,
+                    gst_video::VideoFormat::Rgba,
+                    gst_video::VideoFormat::Bgra,
                 ] {
                     let mut new_s = gst::Structure::builder("video/x-raw")
                         .field("format", format.to_str());
@@ -266,7 +277,11 @@ impl BaseTransformImpl for RsBayer2Rgb {
         gst::info!(CAT, imp = self, "Input: {}x{}, stride: {}", width, height, stride);
         gst::info!(CAT, imp = self, "Output: {:?}, stride: {}", out_info.format(), out_info.stride()[0]);
 
-        *self.state.lock().unwrap() = Some(State { in_info, out_info });
+        *self.state.lock().unwrap() = Some(State {
+            in_info,
+            out_info,
+            intermediate_rgb: None,
+        });
 
         Ok(())
     }
@@ -276,8 +291,8 @@ impl BaseTransformImpl for RsBayer2Rgb {
         inbuf: &gst::Buffer,
         outbuf: &mut gst::BufferRef,
     ) -> Result<gst::FlowSuccess, gst::FlowError> {
-        let state = self.state.lock().unwrap();
-        let state = state.as_ref().ok_or(gst::FlowError::NotNegotiated)?;
+        let mut state_guard = self.state.lock().unwrap();
+        let state = state_guard.as_mut().ok_or(gst::FlowError::NotNegotiated)?;
 
 
         // Map input buffer (Bayer data)
@@ -300,16 +315,17 @@ impl BaseTransformImpl for RsBayer2Rgb {
             state.in_info.stride,
         );
 
-            // Wrap with proper stride information
-    let input_mat = unsafe {
-        Mat::new_rows_cols_with_data_unsafe(
-            state.in_info.height as i32,
-            state.in_info.width as i32,
-            opencv::core::CV_8UC1,
-            in_data.as_ptr() as *mut std::ffi::c_void,
-            state.in_info.stride, // Pass stride explicitly
-        ).unwrap()
-    };
+        match opencv_transform(&in_data, &mut out_frame, state) {
+        Ok(()) => Ok(gst::FlowSuccess::Ok),
+        Err(e) => Err(e),
+        }
+        }
+}
+
+fn opencv_transform(
+        in_data: &[u8],
+        out_frame: &mut gst_video::VideoFrameRef<&mut gst::BufferRef>,
+        state: &mut State) -> Result<(), gst::FlowError> {
 
     let mut output_mat = unsafe {
         Mat::new_rows_cols_with_data_unsafe(
@@ -321,10 +337,60 @@ impl BaseTransformImpl for RsBayer2Rgb {
         ).unwrap()
     };
 
-    // Process
-    opencv::imgproc::cvt_color_def(&input_mat,
-                                &mut output_mat,
-                                opencv::imgproc::COLOR_BayerBG2RGB);
-        Ok(gst::FlowSuccess::Ok)
-    }
+    let input_mat = unsafe {
+            Mat::new_rows_cols_with_data_unsafe(
+                state.in_info.height as i32,
+                state.in_info.width as i32,
+                opencv::core::CV_8UC1, //bayer will always be this
+                in_data.as_ptr() as *mut std::ffi::c_void,
+                state.in_info.stride, // Pass stride explicitly
+            ).unwrap()
+        };
+
+     match state.out_info.format() {
+            gst_video::VideoFormat::Bgr | gst_video::VideoFormat::Rgb =>
+            //One pass, RGGB -> BGR/RGB
+        {
+
+        let conversion = match state.out_info.format() {
+            gst_video::VideoFormat::Bgr => opencv::imgproc::COLOR_BayerRGGB2BGR_EA,
+            gst_video::VideoFormat::Rgb => opencv::imgproc::COLOR_BayerRGGB2RGB_EA,
+            _ => return Err(gst::FlowError::NotNegotiated)
+
+        };
+        // Process
+        opencv::imgproc::cvt_color_def(&input_mat,&mut output_mat, conversion)
+                                    .map(|_| ())
+                                    .map_err(|_| gst::FlowError::Error)
+
+            },
+            gst_video::VideoFormat::Rgba => {
+
+            let mut intermediate_rgb = match &mut state.intermediate_rgb {
+
+                Some(mat) => mat,
+                None => {
+                    let mat = unsafe {
+                    Mat::new_rows_cols(
+                    state.in_info.height as i32,
+                    state.in_info.width as i32,
+                    opencv::core::CV_8UC3,
+                ).unwrap()
+                    };
+                state.intermediate_rgb = Some(mat);
+                state.intermediate_rgb.as_mut().unwrap()
+
+                },
+            };
+
+            opencv::imgproc::cvt_color_def(&input_mat, &mut intermediate_rgb, opencv::imgproc::COLOR_BayerRGGB2RGB_EA).map_err(|_| gst::FlowError::Error);
+            opencv::imgproc::cvt_color_def(&input_mat, &mut intermediate_rgb, opencv::imgproc::COLOR_RGB2RGBA).map(|_| ()).map_err(|_| gst::FlowError::Error)
+        },
+        _ => return Err(gst::FlowError::NotNegotiated)
+        }
+
+
+
+
+
 }

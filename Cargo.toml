@@ -2,6 +2,7 @@
 name = "gst-opencv-bayer-convert"
 version = "0.1.0"
 edition = "2024"
+description = "Bayer to RGB/A converter powered by OpenCV"
 
 [dependencies]
 gst = { package = "gstreamer", version = "0.24.3", features = ["v1_16"] }

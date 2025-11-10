@@ -31,6 +31,6 @@ gst::plugin_define!(
     "MIT/X11",
     env!("CARGO_PKG_NAME"),
     env!("CARGO_PKG_NAME"),
-    env!("CARGO_PKG_REPOSITORY"),
+    "TODO",
     env!("BUILD_REL_DATE")
 );
