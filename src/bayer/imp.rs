@@ -1,16 +1,15 @@
-use std::sync::LazyLock;
 use gst::glib;
+use gst::glib::ffi::GFALSE;
 use gst::prelude::*;
 use gst::subclass::prelude::*;
 use gst_base::subclass::prelude::*;
-use gst_base_sys::GstBaseTransformClass;
 use gst_base_sys as ffi;
+use gst_base_sys::GstBaseTransformClass;
 use gst_video::VideoFrameExt;
 use gst_video::VideoFrameRef;
 use opencv::prelude::*;
-use opencv::{highgui, imgproc, videoio, Result};
-
-
+use opencv::{Result, highgui, imgproc, videoio};
+use std::sync::LazyLock;
 
 static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     gst::DebugCategory::new(
@@ -43,59 +42,77 @@ impl RsBayer2Rgb {}
 impl ObjectSubclass for RsBayer2Rgb {
     const NAME: &'static str = "GstRsBayer2Rgb";
     type Type = super::RsBayer2Rgb;
-    type ParentType = gst_base::BaseTransform;  // Changed from VideoFilter
-
+    type ParentType = gst_base::BaseTransform; // Changed from VideoFilter
 
     fn class_init(klass: &mut Self::Class) {
-
         unsafe {
             let base_transform_class = &mut *(klass as *mut _ as *mut ffi::GstBaseTransformClass);
             base_transform_class.get_unit_size = Some(get_unit_size_trampoline)
         }
-
     }
 }
 
 unsafe extern "C" fn get_unit_size_trampoline(
     _ptr: *mut ffi::GstBaseTransform,
     caps: *mut gst_sys::GstCaps,
-    size: *mut usize
-) -> i32 {
-
+    size: *mut usize,
+) -> glib::ffi::gboolean {
     unsafe {
         let caps = gst::Caps::from_glib_borrow(caps);
 
         let Some(structure) = caps.structure(0) else {
-            return 0
+            gst::warning!(CAT, "get_unit_size: no structure in caps");
+            return glib::ffi::GFALSE;
         };
 
         let Ok(width) = structure.get::<i32>("width") else {
-            return 0
+            gst::warning!(CAT, "get_unit_size: no width in caps");
+            return glib::ffi::GFALSE;
         };
 
         let Ok(height) = structure.get::<i32>("height") else {
-            return 0
+            gst::warning!(CAT, "get_unit_size: no height in caps");
+            return glib::ffi::GFALSE;
         };
 
         let width = width as usize;
         let height = height as usize;
-
-        match structure.name().as_str() {
-            "video/x-bayer" => *size = 1 * height * width,
-            "video/raw" => {
+        let result = match structure.name().as_str() {
+            "video/x-bayer" => {
+                *size = 1 * height * width;
+                glib::ffi::GTRUE
+            }
+            "video/x-raw" => {
                 let Ok(format) = structure.get::<&str>("format") else {
-                    return 0
+                    gst::warning!(
+                        CAT,
+                        "Could not find format in structure {}",
+                        structure.to_string()
+                    );
+                    return glib::ffi::GFALSE;
                 };
                 match format {
-                    "RGB" | "BGR" => *size = 3 * height * width,
-                    "RGBA" | "BGRA" | "RGBx" | "BGRx" => *size = 4 * height * width,
-                    _ => return 0,
+                    "RGB" | "BGR" => {
+                        *size = 3 * height * width;
+                        glib::ffi::GTRUE
+                    }
+                    "RGBA" | "BGRA" | "RGBx" | "BGRx" => {
+                        *size = 4 * height * width;
+                        glib::ffi::GTRUE
+                    }
+                    _ => {
+                        gst::warning!(CAT, "{} matched nothing", format);
+                        glib::ffi::GFALSE
+                    }
                 }
             }
-            _ => return 0
+            other => {
+                gst::warning!(CAT, "{} matched nothing", other);
+                glib::ffi::GFALSE
+            }
+        };
 
-        }
-        return 1
+        return result;
     }
 }
 
@@ -120,10 +137,13 @@ impl ElementImpl for RsBayer2Rgb {
                 .field("format", "rggb")
                 .field("width", gst::IntRange::new(1, i32::MAX))
                 .field("height", gst::IntRange::new(1, i32::MAX))
-                .field("framerate", gst::FractionRange::new(
-                    gst::Fraction::new(0, 1),
-                    gst::Fraction::new(i32::MAX, 1),
-                ))
+                .field(
+                    "framerate",
+                    gst::FractionRange::new(
+                        gst::Fraction::new(0, 1),
+                        gst::Fraction::new(i32::MAX, 1),
+                    ),
+                )
                 .build();
 
             let sink_pad_template = gst::PadTemplate::new(
@@ -139,7 +159,6 @@ impl ElementImpl for RsBayer2Rgb {
                     gst_video::VideoFormat::Rgb,
                     gst_video::VideoFormat::Bgr,
                     gst_video::VideoFormat::Rgba,
-                    gst_video::VideoFormat::Bgra,
                 ])
                 .build();
 
@@ -179,8 +198,7 @@ impl BaseTransformImpl for RsBayer2Rgb {
                 let height = s.get::<i32>("height").ok();
                 let framerate = s.get::<gst::Fraction>("framerate").ok();
 
-                let mut new_s = gst::Structure::builder("video/x-bayer")
-                    .field("format", "rggb");
+                let mut new_s = gst::Structure::builder("video/x-bayer").field("format", "rggb");
 
                 if let Some(w) = width {
                     new_s = new_s.field("width", w);
@@ -209,10 +227,9 @@ impl BaseTransformImpl for RsBayer2Rgb {
                     gst_video::VideoFormat::Rgb,
                     gst_video::VideoFormat::Bgr,
                     gst_video::VideoFormat::Rgba,
-                    gst_video::VideoFormat::Bgra,
                 ] {
-                    let mut new_s = gst::Structure::builder("video/x-raw")
-                        .field("format", format.to_str());
+                    let mut new_s =
+                        gst::Structure::builder("video/x-raw").field("format", format.to_str());
 
                     if let Some(w) = width {
                         new_s = new_s.field("width", w);
@@ -246,20 +263,18 @@ impl BaseTransformImpl for RsBayer2Rgb {
         }
     }
 
-    fn set_caps(
-        &self,
-        incaps: &gst::Caps,
-        outcaps: &gst::Caps,
-    ) -> Result<(), gst::LoggableError> {
+    fn set_caps(&self, incaps: &gst::Caps, outcaps: &gst::Caps) -> Result<(), gst::LoggableError> {
         gst::info!(CAT, imp = self, "Input caps: {}", incaps);
         gst::info!(CAT, imp = self, "Output caps: {}", outcaps);
 
         // Parse Bayer input caps manually (VideoInfo doesn't support Bayer)
         let s = incaps.structure(0).unwrap();
-        let width = s.get::<i32>("width")
-            .map_err(|_| gst::loggable_error!(CAT, "No width in caps"))? as usize;
-        let height = s.get::<i32>("height")
-            .map_err(|_| gst::loggable_error!(CAT, "No height in caps"))? as usize;
+        let width =
+            s.get::<i32>("width")
+                .map_err(|_| gst::loggable_error!(CAT, "No width in caps"))? as usize;
+        let height =
+            s.get::<i32>("height")
+                .map_err(|_| gst::loggable_error!(CAT, "No height in caps"))? as usize;
 
         // For Bayer, stride is typically width (1 byte per pixel) but may be padded
         // Use width as stride - GStreamer will pad if needed
@@ -274,8 +289,21 @@ impl BaseTransformImpl for RsBayer2Rgb {
         let out_info = gst_video::VideoInfo::from_caps(outcaps)
             .map_err(|_| gst::loggable_error!(CAT, "Failed to parse output caps"))?;
 
-        gst::info!(CAT, imp = self, "Input: {}x{}, stride: {}", width, height, stride);
-        gst::info!(CAT, imp = self, "Output: {:?}, stride: {}", out_info.format(), out_info.stride()[0]);
+        gst::info!(
+            CAT,
+            imp = self,
+            "Input: {}x{}, stride: {}",
+            width,
+            height,
+            stride
+        );
+        gst::info!(
+            CAT,
+            imp = self,
+            "Output: {:?}, stride: {}",
+            out_info.format(),
+            out_info.stride()[0]
+        );
 
         *self.state.lock().unwrap() = Some(State {
             in_info,
@@ -294,16 +322,13 @@ impl BaseTransformImpl for RsBayer2Rgb {
         let mut state_guard = self.state.lock().unwrap();
         let state = state_guard.as_mut().ok_or(gst::FlowError::NotNegotiated)?;
 
-
         // Map input buffer (Bayer data)
         let in_map = inbuf.map_readable().map_err(|_| gst::FlowError::Error)?;
         let in_data = in_map.as_slice();
 
-        let mut out_frame = gst_video::VideoFrameRef::from_buffer_ref_writable(
-            outbuf,
-            &state.out_info,
-        )
-        .map_err(|_| gst::FlowError::Error)?;
+        let mut out_frame =
+            gst_video::VideoFrameRef::from_buffer_ref_writable(outbuf, &state.out_info)
+                .map_err(|_| gst::FlowError::Error)?;
         // Map output buffer (RGB data) - wrapping in VideoFrame for convenience
 
         gst::info!(
@@ -316,81 +341,96 @@ impl BaseTransformImpl for RsBayer2Rgb {
         );
 
         match opencv_transform(&in_data, &mut out_frame, state) {
-        Ok(()) => Ok(gst::FlowSuccess::Ok),
-        Err(e) => Err(e),
+            Ok(()) => Ok(gst::FlowSuccess::Ok),
+            Err(e) => Err(e),
         }
-        }
+    }
 }
 
 fn opencv_transform(
-        in_data: &[u8],
-        out_frame: &mut gst_video::VideoFrameRef<&mut gst::BufferRef>,
-        state: &mut State) -> Result<(), gst::FlowError> {
-
-    let mut output_mat = unsafe {
+    in_data: &[u8],
+    out_frame: &mut gst_video::VideoFrameRef<&mut gst::BufferRef>,
+    state: &mut State,
+) -> Result<(), gst::FlowError> {
+    let input_mat = unsafe {
         Mat::new_rows_cols_with_data_unsafe(
-            state.out_info.height() as i32,
-            state.out_info.width() as i32,
-            opencv::core::CV_8UC3, // Grayscale
-            out_frame.plane_data_mut(0).unwrap().as_mut_ptr() as *mut std::ffi::c_void,
-            out_frame.plane_stride()[0] as usize
-        ).unwrap()
+            state.in_info.height as i32,
+            state.in_info.width as i32,
+            opencv::core::CV_8UC1, //bayer will always be this
+            in_data.as_ptr() as *mut std::ffi::c_void,
+            state.in_info.stride, // Pass stride explicitly
+        )
+        .unwrap()
     };
 
-    let input_mat = unsafe {
-            Mat::new_rows_cols_with_data_unsafe(
-                state.in_info.height as i32,
-                state.in_info.width as i32,
-                opencv::core::CV_8UC1, //bayer will always be this
-                in_data.as_ptr() as *mut std::ffi::c_void,
-                state.in_info.stride, // Pass stride explicitly
-            ).unwrap()
-        };
-
-     match state.out_info.format() {
-            gst_video::VideoFormat::Bgr | gst_video::VideoFormat::Rgb =>
-            //One pass, RGGB -> BGR/RGB
+    match state.out_info.format() {
+        gst_video::VideoFormat::Bgr | gst_video::VideoFormat::Rgb =>
+        //One pass, RGGB -> BGR/RGB
         {
-
-        let conversion = match state.out_info.format() {
-            gst_video::VideoFormat::Bgr => opencv::imgproc::COLOR_BayerRGGB2BGR_EA,
-            gst_video::VideoFormat::Rgb => opencv::imgproc::COLOR_BayerRGGB2RGB_EA,
-            _ => return Err(gst::FlowError::NotNegotiated)
-
-        };
-        // Process
-        opencv::imgproc::cvt_color_def(&input_mat,&mut output_mat, conversion)
-                                    .map(|_| ())
-                                    .map_err(|_| gst::FlowError::Error)
-
-            },
-            gst_video::VideoFormat::Rgba => {
-
-            let mut intermediate_rgb = match &mut state.intermediate_rgb {
-
-                Some(mat) => mat,
-                None => {
-                    let mat = unsafe {
-                    Mat::new_rows_cols(
-                    state.in_info.height as i32,
-                    state.in_info.width as i32,
-                    opencv::core::CV_8UC3,
-                ).unwrap()
-                    };
-                state.intermediate_rgb = Some(mat);
-                state.intermediate_rgb.as_mut().unwrap()
-
-                },
+            let conversion = match state.out_info.format() {
+                gst_video::VideoFormat::Bgr => opencv::imgproc::COLOR_BayerRGGB2BGR_EA,
+                gst_video::VideoFormat::Rgb => opencv::imgproc::COLOR_BayerRGGB2RGB_EA,
+                _ => return Err(gst::FlowError::NotNegotiated),
             };
-
-            opencv::imgproc::cvt_color_def(&input_mat, &mut intermediate_rgb, opencv::imgproc::COLOR_BayerRGGB2RGB_EA).map_err(|_| gst::FlowError::Error);
-            opencv::imgproc::cvt_color_def(&input_mat, &mut intermediate_rgb, opencv::imgproc::COLOR_RGB2RGBA).map(|_| ()).map_err(|_| gst::FlowError::Error)
-        },
-        _ => return Err(gst::FlowError::NotNegotiated)
+            let mut output_mat = unsafe {
+                Mat::new_rows_cols_with_data_unsafe(
+                    state.out_info.height() as i32,
+                    state.out_info.width() as i32,
+                    opencv::core::CV_8UC3, // Grayscale
+                    out_frame.plane_data_mut(0).unwrap().as_mut_ptr() as *mut std::ffi::c_void,
+                    out_frame.plane_stride()[0] as usize,
+                )
+                .unwrap()
+            };
+            // Process
+            opencv::imgproc::cvt_color_def(&input_mat, &mut output_mat, conversion)
+                .map(|_| ())
+                .map_err(|_| gst::FlowError::Error)
         }
+        gst_video::VideoFormat::Rgba => {
+            {
+                let mut intermediate_rgb = match &mut state.intermediate_rgb {
+                    Some(mat) => mat,
+                    None => {
+                        let mat = unsafe {
+                            Mat::new_rows_cols(
+                                state.in_info.height as i32,
+                                state.in_info.width as i32,
+                                opencv::core::CV_8UC3,
+                            )
+                            .unwrap()
+                        };
+                        state.intermediate_rgb = Some(mat);
+                        state.intermediate_rgb.as_mut().unwrap()
+                    }
+                };
 
+                opencv::imgproc::cvt_color_def(
+                    &input_mat,
+                    &mut intermediate_rgb,
+                    opencv::imgproc::COLOR_BayerRGGB2RGB_EA,
+                )
+                .map_err(|_| gst::FlowError::Error);
+            }
 
-
-
-
+            let mut output_mat = unsafe {
+                Mat::new_rows_cols_with_data_unsafe(
+                    state.out_info.height() as i32,
+                    state.out_info.width() as i32,
+                    opencv::core::CV_8UC4,
+                    out_frame.plane_data_mut(0).unwrap().as_mut_ptr() as *mut std::ffi::c_void,
+                    out_frame.plane_stride()[0] as usize,
+                )
+                .unwrap()
+            };
+            opencv::imgproc::cvt_color_def(
+                state.intermediate_rgb.as_ref().unwrap(),
+                &mut output_mat,
+                opencv::imgproc::COLOR_RGB2RGBA,
+            )
+            .map(|_| ())
+            .map_err(|_| gst::FlowError::Error)
+        }
+        _ => return Err(gst::FlowError::NotNegotiated),
+    }
 }
