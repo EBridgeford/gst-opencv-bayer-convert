@@ -366,8 +366,8 @@ fn opencv_transform(
         //One pass, RGGB -> BGR/RGB
         {
             let conversion = match state.out_info.format() {
-                gst_video::VideoFormat::Bgr => opencv::imgproc::COLOR_BayerRGGB2BGR,
-                gst_video::VideoFormat::Rgb => opencv::imgproc::COLOR_BayerRGGB2RGB,
+                gst_video::VideoFormat::Bgr => opencv::imgproc::COLOR_BayerBG2BGR,
+                gst_video::VideoFormat::Rgb => opencv::imgproc::COLOR_BayerBG2RGB,
                 _ => return Err(gst::FlowError::NotNegotiated),
             };
             let mut output_mat = unsafe {
@@ -410,7 +410,7 @@ fn opencv_transform(
                 opencv::imgproc::cvt_color_def(
                     &input_mat,
                     &mut intermediate_rgb,
-                    opencv::imgproc::COLOR_BayerRGGB2RGB,
+                    opencv::imgproc::COLOR_BayerBG2RGB,
                 )
                 .map_err(|_| gst::FlowError::Error)?;
             }
