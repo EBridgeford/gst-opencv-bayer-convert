@@ -156,8 +156,8 @@ impl ElementImpl for RsBayer2Rgb {
 
             let src_caps = gst_video::VideoCapsBuilder::new()
                 .format_list([
-                    gst_video::VideoFormat::Rgb,
-                    gst_video::VideoFormat::Bgr,
+                    //gst_video::VideoFormat::Rgb,
+                   // gst_video::VideoFormat::Bgr,
                     gst_video::VideoFormat::Rgba,
                 ])
                 .build();
@@ -224,8 +224,8 @@ impl BaseTransformImpl for RsBayer2Rgb {
 
                 // Create RGB variants
                 for format in [
-                    gst_video::VideoFormat::Rgb,
-                    gst_video::VideoFormat::Bgr,
+                    //gst_video::VideoFormat::Rgb,
+                    //gst_video::VideoFormat::Bgr,
                     gst_video::VideoFormat::Rgba,
                 ] {
                     let mut new_s =
